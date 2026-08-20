@@ -1,0 +1,17 @@
+{
+  "name": "docflow-saas",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "pnpm run --parallel dev",
+    "dev:api": "pnpm --filter @docflow/api dev",
+    "dev:web": "pnpm --filter @docflow/web dev",
+    "build": "pnpm run -r build",
+    "test": "pnpm run -r test",
+    "db:generate": "pnpm --filter @docflow/api prisma:generate",
+    "db:migrate": "pnpm --filter @docflow/api prisma:migrate",
+    "db:seed": "pnpm --filter @docflow/api prisma:seed"
+  },
+  "packageManager": "pnpm@9.15.0"
+}
