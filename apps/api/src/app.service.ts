@@ -6,6 +6,7 @@ export class AppService {
     return {
       status: 'ok',
       service: 'docflow-api',
+      version: '0.1.0',
       timestamp: new Date().toISOString(),
     };
   }

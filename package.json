@@ -2,18 +2,29 @@
   "name": "docflow-saas",
   "version": "0.1.0",
   "private": true,
-  "description": "MVP SaaS multi-tenant document management and reconciliation (Portugal)",
-  "workspaces": ["apps/*", "packages/*"],
+  "description": "MVP SaaS multi-tenant for document management and reconciliation (Portugal)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "pnpm run --parallel dev",
     "dev:api": "pnpm --filter @docflow/api dev",
     "dev:web": "pnpm --filter @docflow/web dev",
     "build": "pnpm run -r build",
     "test": "pnpm run -r test",
+    "lint": "pnpm run -r lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "db:generate": "pnpm --filter @docflow/api prisma:generate",
     "db:migrate": "pnpm --filter @docflow/api prisma:migrate",
     "db:seed": "pnpm --filter @docflow/api prisma:seed"
   },
-  "engines": { "node": ">=20" },
-  "packageManager": "pnpm@9.15.0"
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.21.0"
 }

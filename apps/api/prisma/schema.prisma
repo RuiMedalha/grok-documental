@@ -1,0 +1,483 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  ACCOUNTING
+  OPERATOR
+  APPROVER
+}
+
+enum DocumentType {
+  fatura_recebida
+  fatura_emitida
+  recibo
+  comprovativo
+  encomenda
+  outro
+}
+
+enum DocumentStatus {
+  novo
+  processado
+  em_revisao
+  arquivado
+}
+
+enum DocumentOrigin {
+  upload
+  email
+  scanner
+  mobile
+  whatsapp
+}
+
+
+enum PartyType {
+  supplier
+  customer
+  both
+}
+
+enum PaymentStatus {
+  draft
+  to_pay
+  scheduled
+  paid
+  cancelled
+}
+
+enum AccountType {
+  asset
+  liability
+  equity
+  revenue
+  expense
+}
+
+enum AuditAction {
+  login
+  logout
+  upload
+  edit
+  approve
+  reject
+  import
+  reconcile
+  create_tenant
+  invite_user
+  delete
+}
+
+model Tenant {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  nif         String?  // NIF Portugal
+  iban        String?  // IBAN ordenante (pagamentos SEPA)
+  bic         String?
+  bankName    String?
+  address     String?
+  settings    Json?    // preferências gerais
+  scanToken   String?  @unique // token para scanner/MFP drop
+  scanEmail   String?  // alias email inbound (opcional)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users           User[]
+  documents       Document[]
+  bankTransactions BankTransaction[]
+  folderRules     FolderRule[]
+  csvTemplates    CsvTemplate[]
+  auditLogs       AuditLog[]
+  integrations    Integration[]
+  expenses        Expense[]
+  invoices        Invoice[]
+  payments        Payment[]
+  parties         Party[]
+  accounts        Account[]
+  journalLines    JournalLine[]
+  payableItems    PayableItem[]
+
+  @@map("tenants")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  email        String
+  passwordHash String
+  name         String
+  role         UserRole @default(OPERATOR)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant       Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+  auditLogs    AuditLog[]
+  documents    Document[] @relation("UploadedBy")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Document {
+  id             String         @id @default(uuid())
+  tenantId       String
+  uploadedById   String?
+  origin         DocumentOrigin @default(upload)
+  type           DocumentType   @default(outro)
+  status         DocumentStatus @default(novo)
+  fileName       String
+  fileKey        String         // S3 key
+  fileHash       String         // SHA256 for duplicate detection
+  mimeType       String
+  fileSize       Int
+  // Extracted / editable fields
+  supplier       String?
+  customer       String?
+  nif            String?
+  docNumber      String?
+  docDate        DateTime?
+  dueDate        DateTime?
+  total          Decimal?       @db.Decimal(12, 2)
+  iva            Decimal?       @db.Decimal(12, 2)
+  currency       String         @default("EUR")
+  tags           String[]       @default([])
+  suggestedFolder String?
+  finalFolder    String?
+  metadata       Json?
+  // Accounting & master data links
+  partyId        String?        // supplier or customer
+  debitAccountId String?        // conta a debitar (ex: 62 compras)
+  creditAccountId String?       // conta a creditar (ex: 221 fornecedores)
+  costCenter     String?
+  paymentStatus  PaymentStatus  @default(draft)
+  paymentDueDate DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  uploadedBy User?    @relation("UploadedBy", fields: [uploadedById], references: [id])
+  party      Party?   @relation(fields: [partyId], references: [id])
+  debitAccount  Account? @relation("DocDebit", fields: [debitAccountId], references: [id])
+  creditAccount Account? @relation("DocCredit", fields: [creditAccountId], references: [id])
+  expenses   Expense[]
+  invoices   Invoice[]
+  journalLines JournalLine[]
+  payableItems PayableItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, fileHash])
+  @@index([tenantId, docNumber, total, docDate])
+  @@index([tenantId, partyId])
+  @@index([tenantId, paymentStatus])
+  @@map("documents")
+}
+
+model FolderRule {
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  priority    Int      @default(0)
+  // Conditions (simple JSON)
+  conditions  Json     // { type?: string, supplier?: string, emailDomain?: string, keywords?: string[] }
+  // Pattern e.g. /{Ano}/{Mes}/{Tipo}/{Entidade}
+  folderPattern String
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("folder_rules")
+}
+
+model CsvTemplate {
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  // Column mapping
+  mapping     Json     // { date: "ColA", description: "ColB", amount: "ColC" | debit+credit, ... }
+  dateFormat  String   @default("DD/MM/YYYY")
+  decimalSep  String   @default(",")
+  thousandSep String?  @default(".")
+  hasHeader   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("csv_templates")
+}
+
+model BankTransaction {
+  id          String   @id @default(uuid())
+  tenantId    String
+  date        DateTime
+  description String
+  amount      Decimal  @db.Decimal(12, 2) // positive = credit, negative = debit
+  balance     Decimal? @db.Decimal(12, 2)
+  reference   String?
+  rawRowJson  Json?
+  importHash  String   // to prevent duplicate imports
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  matches  MatchSuggestion[]
+
+  @@index([tenantId])
+  @@index([tenantId, date])
+  @@index([tenantId, importHash])
+  @@map("bank_transactions")
+}
+
+model Expense {
+  id          String   @id @default(uuid())
+  tenantId    String
+  documentId  String?
+  description String?
+  amount      Decimal  @db.Decimal(12, 2)
+  date        DateTime?
+  supplier    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document Document? @relation(fields: [documentId], references: [id])
+  matches  MatchSuggestion[]
+
+  @@index([tenantId])
+  @@map("expenses")
+}
+
+model Invoice {
+  id          String   @id @default(uuid())
+  tenantId    String
+  documentId  String?
+  number      String?
+  amount      Decimal  @db.Decimal(12, 2)
+  date        DateTime?
+  customer    String?
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document Document? @relation(fields: [documentId], references: [id])
+  matches  MatchSuggestion[]
+  payments Payment[]
+
+  @@index([tenantId])
+  @@map("invoices")
+}
+
+model MatchSuggestion {
+  id                 String   @id @default(uuid())
+  tenantId           String
+  bankTransactionId  String
+  expenseId          String?
+  invoiceId          String?
+  score              Float    // 0-1
+  matchType          String   // strong | medium | weak
+  status             String   @default("pending") // pending | accepted | rejected
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  bankTransaction BankTransaction @relation(fields: [bankTransactionId], references: [id], onDelete: Cascade)
+  expense         Expense?        @relation(fields: [expenseId], references: [id])
+  invoice         Invoice?        @relation(fields: [invoiceId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("match_suggestions")
+}
+
+model Payment {
+  id          String   @id @default(uuid())
+  tenantId    String
+  invoiceId   String?
+  amount      Decimal  @db.Decimal(12, 2)
+  reference   String?
+  provider    String?  // ifthenpay, etc
+  externalId  String?
+  status      String   @default("pending")
+  rawPayload  Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoice Invoice? @relation(fields: [invoiceId], references: [id])
+
+  @@index([tenantId])
+  @@map("payments")
+}
+
+
+model Party {
+  id           String    @id @default(uuid())
+  tenantId     String
+  type         PartyType @default(supplier)
+  name         String
+  nif          String?
+  email        String?
+  phone        String?
+  iban         String?
+  address      String?
+  city         String?
+  postalCode   String?
+  country      String    @default("PT")
+  // Default accounting for this party
+  defaultDebitAccountId  String?
+  defaultCreditAccountId String?
+  paymentTermDays Int?
+  // External CRM / ERP ids
+  externalIds  Json?     // { hubspot: "...", pipedrive: "...", moloni: "..." }
+  notes        String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  tenant   Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  documents Document[]
+  payableItems PayableItem[]
+
+  @@index([tenantId])
+  @@index([tenantId, nif])
+  @@index([tenantId, type])
+  @@index([tenantId, name])
+  @@map("parties")
+}
+
+model Account {
+  id          String      @id @default(uuid())
+  tenantId    String
+  code        String      // e.g. "221", "62", "31"
+  name        String
+  type        AccountType @default(expense)
+  parentCode  String?
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  debitDocs  Document[] @relation("DocDebit")
+  creditDocs Document[] @relation("DocCredit")
+  journalLines JournalLine[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("accounts")
+}
+
+model JournalLine {
+  id          String   @id @default(uuid())
+  tenantId    String
+  documentId  String?
+  accountId   String
+  description String?
+  debit       Decimal  @default(0) @db.Decimal(12, 2)
+  credit      Decimal  @default(0) @db.Decimal(12, 2)
+  date        DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document Document? @relation(fields: [documentId], references: [id])
+  account  Account   @relation(fields: [accountId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, documentId])
+  @@map("journal_lines")
+}
+
+/// Contas a pagar / a receber derivadas de faturas
+model PayableItem {
+  id            String        @id @default(uuid())
+  tenantId      String
+  documentId    String?
+  partyId       String?
+  description   String?
+  amount        Decimal       @db.Decimal(12, 2)
+  dueDate       DateTime?
+  status        PaymentStatus @default(to_pay)
+  paidAt        DateTime?
+  paidAmount    Decimal?      @db.Decimal(12, 2)
+  paymentMethod String?       // sepa | mb | transfer | card | cash | other
+  paymentRef    String?       // ref MB, end-to-end SEPA, etc.
+  bankTxId      String?       // optional link after reconciliation
+  notes         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document Document? @relation(fields: [documentId], references: [id])
+  party    Party?    @relation(fields: [partyId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, dueDate])
+  @@map("payable_items")
+}
+
+model Integration {
+  id          String   @id @default(uuid())
+  tenantId    String
+  provider    String   // woocommerce | ifthenpay | moloni
+  credentials Json     // encrypted in prod
+  isActive    Boolean  @default(true)
+  lastSyncAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, provider])
+  @@index([tenantId])
+  @@map("integrations")
+}
+
+model AuditLog {
+  id         String      @id @default(uuid())
+  tenantId   String
+  userId     String?
+  action     AuditAction
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime    @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}

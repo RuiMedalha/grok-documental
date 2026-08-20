@@ -64,6 +64,7 @@ async function main() {
     },
   });
 
+  // Chart of accounts
   for (const a of DEFAULT_ACCOUNTS) {
     await prisma.account.upsert({
       where: { tenantId_code: { tenantId: tenant.id, code: a.code } },
@@ -71,10 +72,16 @@ async function main() {
       create: { tenantId: tenant.id, ...a },
     });
   }
+  console.log('Accounts seeded:', DEFAULT_ACCOUNTS.length);
 
-  const acc221 = await prisma.account.findFirst({ where: { tenantId: tenant.id, code: '221' } });
-  const acc62 = await prisma.account.findFirst({ where: { tenantId: tenant.id, code: '62' } });
+  const acc221 = await prisma.account.findFirst({
+    where: { tenantId: tenant.id, code: '221' },
+  });
+  const acc62 = await prisma.account.findFirst({
+    where: { tenantId: tenant.id, code: '62' },
+  });
 
+  // Sample parties
   await prisma.party.upsert({
     where: { id: '00000000-0000-0000-0000-000000000010' },
     update: {},
@@ -104,6 +111,8 @@ async function main() {
       paymentTermDays: 30,
     },
   });
+  console.log('Parties seeded');
+
   console.log('Seed completed successfully');
 }
 

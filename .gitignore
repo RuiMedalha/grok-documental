@@ -8,6 +8,15 @@ dist
 *.log
 coverage
 .DS_Store
+.idea
+.vscode
+prisma/*.db
+prisma/*.db-journal
 uploads
 tmp
 *.tsbuildinfo
+node_modules
+.env
+*.zip
+package.json.bak
+uploads
