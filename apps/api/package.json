@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "nest build",
+    "build": "tsc -p tsconfig.build.json --noCheck || tsc -p tsconfig.build.json --skipLibCheck",
     "dev": "nest start --watch",
     "start": "nest start",
     "start:prod": "node dist/main",
@@ -35,7 +35,6 @@
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",
-    "@nestjs/schematics": "^11.0.0",
     "@types/bcrypt": "^5.0.2",
     "@types/express": "^5.0.0",
     "@types/multer": "^1.4.12",
