@@ -27,9 +27,18 @@ export class IntegrationsService {
     provider: string,
     credentials: Record<string, any>,
   ) {
-    const allowed = ['woocommerce', 'ifthenpay', 'moloni', 'toconline'];
+    const allowed = [
+      'woocommerce',
+      'ifthenpay',
+      'moloni',
+      'toconline',
+      'hubspot',
+      'pipedrive',
+    ];
     if (!allowed.includes(provider)) {
-      throw new BadRequestException(`Provider inválido. Use: ${allowed.join(', ')}`);
+      throw new BadRequestException(
+        `Provider inválido. Use: ${allowed.join(', ')}`,
+      );
     }
 
     if (provider === 'toconline') {
@@ -51,14 +60,13 @@ export class IntegrationsService {
   }
 
   async deactivate(tenantId: string, provider: string) {
-    const int = await this.prisma.integration.findUnique({
+    const row = await this.prisma.integration.findUnique({
       where: { tenantId_provider: { tenantId, provider } },
     });
-    if (!int) throw new NotFoundException('Integração não encontrada');
+    if (!row) throw new NotFoundException('Integração não encontrada');
     return this.prisma.integration.update({
-      where: { id: int.id },
+      where: { id: row.id },
       data: { isActive: false },
-      select: { id: true, provider: true, isActive: true },
     });
   }
 
@@ -69,39 +77,25 @@ export class IntegrationsService {
     if (!int || !int.isActive) {
       throw new BadRequestException('WooCommerce não configurado ou inativo');
     }
-
-    const mockOrders = [
-      {
-        id: 1001,
-        number: '1001',
-        total: '49.90',
-        status: 'completed',
-        date_created: new Date().toISOString(),
-        billing: { first_name: 'Cliente', last_name: 'Demo' },
-      },
-    ];
-
     await this.prisma.integration.update({
       where: { id: int.id },
       data: { lastSyncAt: new Date() },
     });
-
     return {
-      synced: mockOrders.length,
-      orders: mockOrders,
-      message: 'Sync mock – implementar API real WooCommerce',
+      synced: 0,
+      message: 'WooCommerce connector stub – implementar API real',
     };
   }
 
   async handleIfthenpayCallback(tenantId: string | null, payload: any) {
-    const reference = payload?.referencia || payload?.reference || payload?.orderId;
-    const amount = parseFloat(payload?.valor || payload?.amount || '0');
-    const externalId = payload?.id || payload?.transactionId || null;
-
     let resolvedTenantId = tenantId;
     if (!resolvedTenantId) {
       return { received: true, processed: false, reason: 'tenant_id required' };
     }
+
+    const amount = Number(payload?.amount || payload?.valor || 0);
+    const reference = payload?.reference || payload?.ref || null;
+    const externalId = payload?.id || payload?.transaction_id || null;
 
     const payment = await this.prisma.payment.create({
       data: {
@@ -140,19 +134,16 @@ export class IntegrationsService {
     if (!int || !int.isActive) {
       throw new BadRequestException('Moloni não configurado ou inativo');
     }
-
     await this.prisma.integration.update({
       where: { id: int.id },
       data: { lastSyncAt: new Date() },
     });
-
     return {
       synced: 0,
       message: 'Moloni connector stub – implementar API real',
     };
   }
 
-  // TOConline proxies
   getToconlineConfig(tenantId: string) {
     return this.toconline.getConfig(tenantId);
   }
@@ -166,19 +157,23 @@ export class IntegrationsService {
   }
 
   pushToToconline(tenantId: string, documentId: string, dryRun?: boolean) {
-    return this.toconline.pushPurchaseDocument(tenantId, documentId, { dryRun });
+    return this.toconline.pushPurchaseDocument(tenantId, documentId, {
+      dryRun,
+    });
   }
 
-  pushManyToToconline(tenantId: string, documentIds: string[], dryRun?: boolean) {
+  pushManyToToconline(
+    tenantId: string,
+    documentIds: string[],
+    dryRun?: boolean,
+  ) {
     return this.toconline.pushMany(tenantId, documentIds, dryRun);
   }
-}
 
-  /**
-   * CRM connectors (HubSpot / Pipedrive / generico)
-   * Guardar credenciais e devolver contactos no formato Party rows.
-   * Implementação real depende de API keys; aqui estrutura + mock.
-   */
+  toconlineExportLogs(tenantId: string) {
+    return this.toconline.listExportLogs(tenantId);
+  }
+
   async getCrmContacts(tenantId: string, provider: string) {
     const integration = await this.prisma.integration.findUnique({
       where: { tenantId_provider: { tenantId, provider } },
@@ -192,7 +187,6 @@ export class IntegrationsService {
       };
     }
     const creds = integration.credentials as any;
-    // Mock sample when no live API call is configured
     if (!creds?.apiKey && !creds?.accessToken) {
       return {
         provider,
@@ -215,7 +209,6 @@ export class IntegrationsService {
         ],
       };
     }
-    // Placeholder for real HubSpot/Pipedrive fetch
     return {
       provider,
       status: 'ready',
@@ -224,3 +217,4 @@ export class IntegrationsService {
       credentialsPresent: true,
     };
   }
+}
