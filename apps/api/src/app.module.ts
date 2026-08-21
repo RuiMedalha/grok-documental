@@ -15,13 +15,16 @@ import { PayablesModule } from './payables/payables.module';
 import { ExtractionModule } from './extraction/extraction.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { TenantsModule } from './tenants/tenants.module';
+import { AuditModule } from './audit/audit.module';
 import { SearchModule } from './search/search.module';
 import { InboundModule } from './inbound/inbound.module';
+import { HealthModule } from './health/health.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 
 @Module({
   imports: [
+    AuditModule,
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: ['.env', '../../.env'],
@@ -47,6 +50,7 @@ import { AppService } from './app.service';
     TenantsModule,
     SearchModule,
     InboundModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [
