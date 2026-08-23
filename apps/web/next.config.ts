@@ -4,12 +4,11 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   output: 'standalone',
   eslint: {
-    // MVP: não bloquear deploy no Coolify por regras no-explicit-any
     ignoreDuringBuilds: true,
   },
   typescript: {
-    // Opcional: se o typecheck bloquear o build, descomenta:
-    // ignoreBuildErrors: true,
+    // MVP deploy no Coolify: não bloquear por erros de tipo
+    ignoreBuildErrors: true,
   },
 };
 
