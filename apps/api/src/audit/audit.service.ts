@@ -19,7 +19,7 @@ export class AuditService {
         data: {
           tenantId: params.tenantId,
           userId: params.userId || null,
-          action: params.action,
+          action: params.action as any,
           entityType: params.entityType || null,
           entityId: params.entityId || null,
           metadata: (params.metadata ?? undefined) as
