@@ -8,9 +8,23 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api');
 
+  // WEB_URL = domínio(s) do frontend, separados por vírgula
+  // Ex: https://g11b66....sslip.io
+  // Se vazio ou *, reflete o Origin do pedido (OK para MVP Coolify)
+  const raw = process.env.WEB_URL || process.env.CORS_ORIGIN || '*';
+  const webOrigins = raw.split(',').map((s) => s.trim()).filter(Boolean);
+
   app.enableCors({
-    origin: process.env.WEB_URL || 'http://localhost:3000',
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (webOrigins.includes('*')) return cb(null, true);
+      if (webOrigins.includes(origin)) return cb(null, true);
+      // fallback: reflect request origin (evita bloquear Coolify sslip.io)
+      return cb(null, true);
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   });
 
   app.useGlobalPipes(
@@ -24,7 +38,9 @@ async function bootstrap() {
 
   const config = new DocumentBuilder()
     .setTitle('DocFlow API')
-    .setDescription('Multi-tenant SaaS for document management & reconciliation (Portugal)')
+    .setDescription(
+      'Multi-tenant SaaS for document management & reconciliation (Portugal)',
+    )
     .setVersion('0.1.0')
     .addBearerAuth()
     .addTag('auth')
@@ -40,7 +56,7 @@ async function bootstrap() {
 
   const port = process.env.API_PORT || process.env.PORT || 3001;
   await app.listen(port);
-  console.log(`DocFlow API running on http://localhost:${port}`);
-  console.log(`Swagger docs: http://localhost:${port}/api/docs`);
+  console.log(`DocFlow API running on port ${port}`);
+  console.log(`Swagger: /api/docs`);
 }
 bootstrap();
