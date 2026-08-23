@@ -11,8 +11,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json tsconfig.json tsconfig.build.json ./
 COPY prisma ./prisma
 COPY src ./src
+# --noCheck: emite JS sem bloquear em erros de tipo (MVP Coolify)
 RUN npx prisma generate \
-  && (npx tsc -p tsconfig.build.json --noCheck || npx tsc -p tsconfig.build.json) \
+  && npx tsc -p tsconfig.build.json --noCheck \
   && ls -la dist \
   && test -f dist/main.js
 
