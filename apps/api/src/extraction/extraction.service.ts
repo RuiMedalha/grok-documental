@@ -2,16 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PartiesService } from '../parties/parties.service';
 import { PartyType } from '@prisma/client';
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parseAtQr, atQrToDocumentFields, isLikelyAtQr } from './at-qr.parser';
+import { extractTextFromFile } from './ocr.util';
 
 export interface ExtractedFields {
   supplier?: string;
   customer?: string;
   nif?: string;
   docNumber?: string;
-  docDate?: string; // ISO
+  docDate?: string;
   dueDate?: string;
   total?: number;
   iva?: number;
@@ -20,10 +20,6 @@ export interface ExtractedFields {
   rawHints: string[];
 }
 
-/**
- * MVP extraction: regex heuristics on text.
- * PDF/image: if plain text available use it; otherwise placeholder for OCR (Tesseract/AWS Textract).
- */
 @Injectable()
 export class ExtractionService {
   private readonly logger = new Logger(ExtractionService.name);
@@ -33,20 +29,21 @@ export class ExtractionService {
     private parties: PartiesService,
   ) {}
 
-  /** Extract structured fields from free text (OCR output or DOCX text) */
   extractFromText(text: string): ExtractedFields {
     const hints: string[] = [];
     const normalized = text.replace(/\r/g, '\n');
 
-    // Prefer AT QR payload if present in text
-    const qrCandidate = normalized.split(/\n/).find((l) => isLikelyAtQr(l)) || (isLikelyAtQr(normalized.replace(/\s/g, '')) ? normalized.replace(/\s/g, '') : null);
+    const qrCandidate =
+      normalized.split(/\n/).find((l) => isLikelyAtQr(l)) ||
+      (isLikelyAtQr(normalized.replace(/\s/g, ''))
+        ? normalized.replace(/\s/g, '')
+        : null);
     if (qrCandidate) {
       const at = parseAtQr(qrCandidate.replace(/\s/g, ''));
       if (at) {
         const mapped = atQrToDocumentFields(at);
         hints.push('source:at_qr', `atcud:${at.atcud || ''}`);
         return {
-          supplier: undefined,
           nif: mapped.nif,
           docNumber: mapped.docNumber,
           docDate: mapped.docDate,
@@ -59,15 +56,12 @@ export class ExtractionService {
       }
     }
 
-
-    // Portuguese NIF: 9 digits
     const nifMatch =
       normalized.match(/(?:NIF|N\.?\s*I\.?\s*F\.?|Contribuinte)[:\s]*(\d{9})/i) ||
       normalized.match(/\b([123568]\d{8})\b/);
     const nif = nifMatch?.[1];
     if (nif) hints.push(`nif:${nif}`);
 
-    // Invoice number
     const numMatch =
       normalized.match(
         /(?:Fatura|Factura|FT|Invoice|N[ºo°\.]*\s*(?:Fatura|FT)?)[:\s#]*([A-Z0-9\/\-]+)/i,
@@ -75,10 +69,7 @@ export class ExtractionService {
     const docNumber = numMatch?.[1]?.trim();
     if (docNumber) hints.push(`docNumber:${docNumber}`);
 
-    // Dates DD/MM/YYYY or YYYY-MM-DD
-    const dateMatches = [
-      ...normalized.matchAll(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/g),
-    ];
+    const dateMatches = [...normalized.matchAll(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/g)];
     let docDate: string | undefined;
     let dueDate: string | undefined;
     if (dateMatches[0]) {
@@ -94,14 +85,11 @@ export class ExtractionService {
       hints.push(`dueDate:${dueDate}`);
     }
 
-    // Amounts: total / IVA
     const totalMatch =
       normalized.match(
-        /(?:Total\s*(?:a\s*pagar|il[ií]quido|com\s*IVA)?|Total\s*GERAL|Amount\s*due)[:\s]*€?\s*([\d\.,]+)/i,
+        /(?:Total\s*(?:a\s*pagar|il[íi]quido|com\s*IVA)?|Total\s*GERAL|Amount\s*due)[:\s]*€?\s*([\d\.,]+)/i,
       ) || normalized.match(/TOTAL[:\s]*€?\s*([\d\.,]+)/i);
-    const ivaMatch = normalized.match(
-      /(?:IVA|VAT|I\.V\.A\.)[:\s]*€?\s*([\d\.,]+)/i,
-    );
+    const ivaMatch = normalized.match(/(?:IVA|VAT|I\.V\.A\.)[:\s]*€?\s*([\d\.,]+)/i);
 
     const parsePt = (s?: string) => {
       if (!s) return undefined;
@@ -115,11 +103,8 @@ export class ExtractionService {
     if (total != null) hints.push(`total:${total}`);
     if (iva != null) hints.push(`iva:${iva}`);
 
-    // Supplier heuristic: line near NIF or "Exmo" / company pattern
     let supplier: string | undefined;
-    const supplierLine = normalized.match(
-      /(?:Fornecedor|Emitente|De|From)[:\s]+([^\n]{3,80})/i,
-    );
+    const supplierLine = normalized.match(/(?:Fornecedor|Emitente|De|From)[:\s]+([^\n]{3,80})/i);
     if (supplierLine) {
       supplier = supplierLine[1].trim().slice(0, 120);
       hints.push(`supplier:${supplier}`);
@@ -146,20 +131,12 @@ export class ExtractionService {
     };
   }
 
-  /** Run extraction on uploaded file and update document + optional party link */
-  async applyAtQrPayload(
-    tenantId: string,
-    userId: string,
-    documentId: string,
-    qrText: string,
-  ) {
+  async applyAtQrPayload(tenantId: string, userId: string, documentId: string, qrText: string) {
     const at = parseAtQr(qrText);
     if (!at) throw new Error('QR Code AT inválido ou não reconhecido');
     const mapped = atQrToDocumentFields(at);
 
-    const doc = await this.prisma.document.findFirst({
-      where: { id: documentId, tenantId },
-    });
+    const doc = await this.prisma.document.findFirst({ where: { id: documentId, tenantId } });
     if (!doc) throw new Error('Documento não encontrado');
 
     let partyId = doc.partyId;
@@ -200,52 +177,25 @@ export class ExtractionService {
     return { document: updated, atQr: at };
   }
 
-  async processDocument(
-    tenantId: string,
-    userId: string,
-    documentId: string,
-  ): Promise<{ document: any; extracted: ExtractedFields }> {
-    const doc = await this.prisma.document.findFirst({
-      where: { id: documentId, tenantId },
-    });
+  async processDocument(tenantId: string, userId: string, documentId: string) {
+    const doc = await this.prisma.document.findFirst({ where: { id: documentId, tenantId } });
     if (!doc) throw new Error('Documento não encontrado');
 
     let text = '';
+    let engine = 'none';
     try {
       const fullPath = path.isAbsolute(doc.fileKey)
         ? doc.fileKey
         : path.join(process.cwd(), 'uploads', doc.fileKey);
-      if (doc.mimeType?.includes('text') || doc.fileName.endsWith('.txt')) {
-        text = await fs.readFile(fullPath, 'utf8');
-      } else if (
-        doc.mimeType?.includes('pdf') ||
-        doc.mimeType?.startsWith('image/')
-      ) {
-        // Placeholder: real OCR would call Tesseract / Textract / Google Vision
-        // Try reading as utf8 in case it's a text-based PDF export
-        try {
-          const buf = await fs.readFile(fullPath);
-          text = buf.toString('utf8').replace(/[^\x20-\x7E\n\r\tÀ-ÿ€]/g, ' ');
-        } catch {
-          text = '';
-        }
-        this.logger.log(
-          `OCR placeholder for ${doc.fileName} — integrate Tesseract/Textract for production`,
-        );
-      }
+      const ocr = await extractTextFromFile(fullPath, doc.mimeType, doc.fileName);
+      text = ocr.text || '';
+      engine = ocr.engine;
+      this.logger.log(`OCR engine=${engine} chars=${text.length} file=${doc.fileName}`);
     } catch (e) {
-      this.logger.warn(`Could not read file for extraction: ${e}`);
+      this.logger.warn(`Could not read/OCR file for extraction: ${e}`);
     }
 
-    // Also use existing metadata fields as weak text
-    text = [
-      text,
-      doc.fileName,
-      doc.supplier,
-      doc.customer,
-      doc.nif,
-      doc.docNumber,
-    ]
+    text = [text, doc.fileName, doc.supplier, doc.customer, doc.nif, doc.docNumber]
       .filter(Boolean)
       .join('\n');
 
@@ -256,6 +206,7 @@ export class ExtractionService {
         ...((doc.metadata as any) || {}),
         extraction: extracted,
         extractedAt: new Date().toISOString(),
+        ocrEngine: engine,
       },
     };
 
@@ -268,14 +219,12 @@ export class ExtractionService {
     if (extracted.dueDate && !doc.dueDate) data.dueDate = new Date(extracted.dueDate);
     if (extracted.confidence >= 0.4) data.status = 'em_revisao';
 
-    // Link party by NIF/name
     if (extracted.nif || extracted.supplier) {
       try {
         const party = await this.parties.matchOrCreate(tenantId, userId, {
           name: extracted.supplier,
           nif: extracted.nif,
-          type:
-            doc.type === 'fatura_emitida' ? PartyType.customer : PartyType.supplier,
+          type: doc.type === 'fatura_emitida' ? PartyType.customer : PartyType.supplier,
         });
         if (party && !doc.partyId) data.partyId = party.id;
       } catch (e) {
