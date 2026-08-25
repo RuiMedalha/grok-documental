@@ -5,7 +5,7 @@ import { PartyType } from '@prisma/client';
 import * as path from 'path';
 import { parseAtQr, atQrToDocumentFields, isLikelyAtQr } from './at-qr.parser';
 import { extractTextFromFile } from './ocr.util';
-import { extractWithGemini, geminiConfigured } from './gemini.vision';
+import { extractWithAi, aiConfigured } from './ai.vision';
 
 export interface ExtractedFields {
   supplier?: string;
@@ -50,40 +50,21 @@ export class ExtractionService {
     const nifMatch =
       normalized.match(/(?:NIF|Contribuinte)[:\s]*(\d{9})/i) ||
       normalized.match(/\b([123568]\d{8})\b/);
-    const nif = nifMatch?.[1];
-    const numMatch = normalized.match(/(?:Fatura|Factura|FT|Invoice)[:\s#]*([A-Z0-9\/\-]+)/i);
-    const docNumber = numMatch?.[1]?.trim();
-    const dateMatches = [...normalized.matchAll(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})/g)];
-    let docDate: string | undefined;
-    if (dateMatches[0]) {
-      const [, d, m, y] = dateMatches[0];
-      docDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-    }
+    const totalMatch = normalized.match(/(?:Total\s*(?:a\s*pagar)?|TOTAL)[:\s]*€?\s*([\d\.,]+)/i);
     const parsePt = (s?: string) => {
       if (!s) return undefined;
       const n = parseFloat(s.replace(/\s/g, '').replace(/\./g, '').replace(',', '.'));
       return Number.isFinite(n) ? n : undefined;
     };
-    const totalMatch = normalized.match(/(?:Total\s*(?:a\s*pagar)?|TOTAL)[:\s]*€?\s*([\d\.,]+)/i);
-    const ivaMatch = normalized.match(/(?:IVA|VAT)[:\s]*€?\s*([\d\.,]+)/i);
-    const supplierLine = normalized.match(/(?:Fornecedor|Emitente)[:\s]+([^\n]{3,80})/i);
+    const nif = nifMatch?.[1];
     const total = parsePt(totalMatch?.[1]);
-    const iva = parsePt(ivaMatch?.[1]);
-    const supplier = supplierLine?.[1]?.trim();
-    let confidence = 0.2;
-    if (nif) confidence += 0.25;
-    if (total != null) confidence += 0.25;
-    if (docNumber) confidence += 0.15;
-    if (docDate) confidence += 0.1;
+    const numMatch = normalized.match(/(?:Fatura|FT|Invoice)[:\s#]*([A-Z0-9\/\-]+)/i);
     return {
-      supplier,
       nif,
-      docNumber,
-      docDate,
+      docNumber: numMatch?.[1]?.trim(),
       total,
-      iva,
       currency: 'EUR',
-      confidence: Math.min(confidence, 0.95),
+      confidence: nif && total != null ? 0.7 : 0.3,
       rawHints: hints,
     };
   }
@@ -117,68 +98,80 @@ export class ExtractionService {
       ? doc.fileKey
       : path.join(process.cwd(), 'uploads', doc.fileKey);
 
-    if (geminiConfigured()) {
+    let text = '';
+    let engine = 'none';
+    try {
+      const pre = await extractTextFromFile(fullPath, doc.mimeType, doc.fileName);
+      text = pre.text || '';
+      engine = pre.engine;
+    } catch (e) {
+      this.logger.warn(`Pré-OCR: ${e}`);
+    }
+
+    const qrLine =
+      text.split(/\n/).find((l) => isLikelyAtQr(l)) ||
+      (isLikelyAtQr(text.replace(/\s/g, '')) ? text.replace(/\s/g, '') : null);
+    const qrFields: any = {};
+    if (qrLine) {
+      const at = parseAtQr(qrLine.replace(/\s/g, ''));
+      if (at) {
+        Object.assign(qrFields, atQrToDocumentFields(at), { source: 'at_qr' });
+        engine = 'at_qr+' + engine;
+        this.logger.log('QR AT detectado');
+      }
+    }
+
+    if (aiConfigured()) {
       try {
-        const g = await extractWithGemini({
+        const g = await extractWithAi({
           filePath: fullPath,
           mimeType: doc.mimeType,
           fileName: doc.fileName,
+          knownFields: Object.keys(qrFields).length ? qrFields : undefined,
         });
         if (g) {
           const extracted = {
             supplier: g.supplier,
-            nif: g.nif,
-            docNumber: g.docNumber,
-            docDate: g.docDate,
+            nif: qrFields.nif || g.nif,
+            docNumber: qrFields.docNumber || g.docNumber,
+            docDate: qrFields.docDate || g.docDate,
             dueDate: g.dueDate,
-            total: g.total,
-            iva: g.iva,
+            total: qrFields.total ?? g.total,
+            iva: qrFields.iva ?? g.iva,
             currency: g.currency || 'EUR',
-            confidence: g.confidence,
-            rawHints: ['source:gemini-vision'],
+            confidence: Math.max(g.confidence, qrFields.nif ? 0.95 : 0),
+            rawHints: ['source:ai', engine],
           };
           const data: any = {
             metadata: {
               ...((doc.metadata as any) || {}),
               extraction: extracted,
               extractedAt: new Date().toISOString(),
-              ocrEngine: 'gemini-vision',
-              geminiNotes: g.notes || null,
+              ocrEngine: g.provider,
+              qr: qrFields.source || null,
             },
           };
-          if (g.supplier && !doc.supplier) data.supplier = g.supplier;
-          if (g.nif && !doc.nif) data.nif = g.nif;
-          if (g.docNumber && !doc.docNumber) data.docNumber = g.docNumber;
-          if (g.total != null && doc.total == null) data.total = g.total;
-          if (g.iva != null && doc.iva == null) data.iva = g.iva;
-          if (g.docDate && !doc.docDate) data.docDate = new Date(g.docDate);
-          if (g.dueDate && !doc.dueDate) data.dueDate = new Date(g.dueDate);
+          if (extracted.supplier && !doc.supplier) data.supplier = extracted.supplier;
+          if (extracted.nif && !doc.nif) data.nif = extracted.nif;
+          if (extracted.docNumber && !doc.docNumber) data.docNumber = extracted.docNumber;
+          if (extracted.total != null && doc.total == null) data.total = extracted.total;
+          if (extracted.iva != null && doc.iva == null) data.iva = extracted.iva;
+          if (extracted.docDate && !doc.docDate) data.docDate = new Date(extracted.docDate);
           if (g.type) data.type = g.type;
-          if (extracted.confidence >= 0.4) data.status = 'em_revisao';
+          data.status = 'em_revisao';
           const updated = await this.prisma.document.update({
             where: { id: documentId },
             data,
             include: { party: true },
           });
-          this.logger.log(`Gemini Vision ok ${doc.fileName}`);
           return { document: updated, extracted };
         }
       } catch (e: any) {
-        this.logger.warn(`Gemini failed, fallback Tesseract: ${e?.message || e}`);
+        this.logger.warn(`AI failed, fallback Tesseract: ${e?.message || e}`);
       }
     }
 
-    let text = '';
-    let engine = 'none';
-    try {
-      const ocr = await extractTextFromFile(fullPath, doc.mimeType, doc.fileName);
-      text = ocr.text || '';
-      engine = ocr.engine;
-    } catch (e) {
-      this.logger.warn(`OCR failed: ${e}`);
-    }
-    text = [text, doc.fileName, doc.supplier, doc.nif, doc.docNumber].filter(Boolean).join('\n');
-    const extracted = this.extractFromText(text);
+    const extracted = this.extractFromText(text + '\n' + (doc.fileName || ''));
     const data: any = {
       metadata: {
         ...((doc.metadata as any) || {}),
@@ -187,12 +180,9 @@ export class ExtractionService {
         ocrEngine: engine,
       },
     };
-    if (extracted.supplier && !doc.supplier) data.supplier = extracted.supplier;
     if (extracted.nif && !doc.nif) data.nif = extracted.nif;
     if (extracted.docNumber && !doc.docNumber) data.docNumber = extracted.docNumber;
     if (extracted.total != null && doc.total == null) data.total = extracted.total;
-    if (extracted.iva != null && doc.iva == null) data.iva = extracted.iva;
-    if (extracted.docDate && !doc.docDate) data.docDate = new Date(extracted.docDate);
     if (extracted.confidence >= 0.4) data.status = 'em_revisao';
     const updated = await this.prisma.document.update({
       where: { id: documentId },
