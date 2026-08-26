@@ -45,7 +45,25 @@ export function aiConfigured() {
 
 const PROMPT = `És um contabilista português. Analisa o documento (fatura/recibo/nota).
 Se existir QR Code da AT (payload A:...*B:...), inclui o texto cru em atQrRaw.
-Devolve APENAS JSON válido com supplier, customer, nif, docNumber, docDate, dueDate, total, iva, currency, type, notes, rawText, atQrRaw, confidence.`;
+Devolve APENAS JSON válido:
+{
+  "supplier": string|null,
+  "customer": string|null,
+  "nif": string|null,
+  "docNumber": string|null,
+  "docDate": "YYYY-MM-DD"|null,
+  "dueDate": "YYYY-MM-DD"|null,
+  "total": number|null,
+  "iva": number|null,
+  "currency": "EUR",
+  "type": "fatura_recebida"|"fatura_emitida"|"recibo"|"comprovativo"|"encomenda"|"outro",
+  "notes": string|null,
+  "rawText": string,
+  "atQrRaw": string|null,
+  "confidence": number
+}
+IMPORTANTE: supplier e customer devem ser STRINGS (nome), nunca objetos.
+type deve ser exactamente um dos valores listados (ex: fatura_recebida).`;
 
 function parseJsonPayload(text: string): any {
   const cleaned = String(text || '')
@@ -56,23 +74,48 @@ function parseJsonPayload(text: string): any {
   return JSON.parse(cleaned);
 }
 
+function asName(v: any): string | undefined {
+  if (v == null || v === '') return undefined;
+  if (typeof v === 'string') return v.trim().slice(0, 200) || undefined;
+  if (typeof v === 'object') {
+    const n = v.name || v.nome || v.businessName || v.razaoSocial;
+    return n ? String(n).trim().slice(0, 200) : undefined;
+  }
+  return String(v).trim().slice(0, 200) || undefined;
+}
+
+function mapDocType(v: any): string | undefined {
+  if (!v) return undefined;
+  const s = String(v).toLowerCase();
+  const allowed = new Set(['fatura_recebida','fatura_emitida','recibo','comprovativo','encomenda','outro']);
+  if (allowed.has(String(v))) return String(v);
+  if (s.includes('emitida') || s.includes('venda')) return 'fatura_emitida';
+  if (s.includes('recibo')) return 'recibo';
+  if (s.includes('comprov')) return 'comprovativo';
+  if (s.includes('encomenda')) return 'encomenda';
+  if (s.includes('fatura') || s.includes('factura') || s.includes('invoice') || s === 'ft') return 'fatura_recebida';
+  return 'fatura_recebida';
+}
+
 function toExtracted(parsed: any, provider: string): AiExtracted {
   const num = (v: any) => {
     if (v == null || v === '') return undefined;
     const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
     return Number.isFinite(n) ? n : undefined;
   };
+  const supplierObj = parsed.supplier && typeof parsed.supplier === 'object' ? parsed.supplier : null;
+  const nifFromSupplier = supplierObj?.nif ? String(supplierObj.nif).replace(/\s/g, '') : undefined;
   return {
-    supplier: parsed.supplier || undefined,
-    customer: parsed.customer || undefined,
-    nif: parsed.nif ? String(parsed.nif).replace(/\s/g, '') : undefined,
+    supplier: asName(parsed.supplier),
+    customer: asName(parsed.customer),
+    nif: (parsed.nif ? String(parsed.nif).replace(/\s/g, '') : undefined) || nifFromSupplier,
     docNumber: parsed.docNumber || undefined,
     docDate: parsed.docDate || undefined,
     dueDate: parsed.dueDate || undefined,
     total: num(parsed.total),
     iva: num(parsed.iva),
     currency: parsed.currency || 'EUR',
-    type: parsed.type || undefined,
+    type: mapDocType(parsed.type),
     notes: parsed.notes || undefined,
     rawText: parsed.rawText || undefined,
     atQrRaw: parsed.atQrRaw || undefined,
@@ -119,6 +162,7 @@ async function callOpenAiCompat(opts: {
     body: JSON.stringify({
       model: opts.model,
       temperature: 0.1,
+      max_tokens: 4096,
       response_format: { type: 'json_object' },
       messages: [{
         role: 'user',

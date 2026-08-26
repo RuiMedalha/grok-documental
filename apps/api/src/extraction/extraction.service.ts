@@ -20,13 +20,30 @@ export interface ExtractedFields {
   rawHints: string[];
 }
 
+function supplierName(v: any): string | undefined {
+  if (!v) return undefined;
+  if (typeof v === 'string') return v.trim().slice(0, 200) || undefined;
+  if (typeof v === 'object' && v.name) return String(v.name).trim().slice(0, 200);
+  return undefined;
+}
+
+function mapType(v: any): string {
+  if (!v) return 'fatura_recebida';
+  const s = String(v).toLowerCase();
+  const allowed = ['fatura_recebida','fatura_emitida','recibo','comprovativo','encomenda','outro'];
+  if (allowed.includes(s)) return s;
+  if (s.includes('recibo')) return 'recibo';
+  if (s.includes('emitida')) return 'fatura_emitida';
+  if (s.includes('fatura') || s.includes('factura') || s === 'ft') return 'fatura_recebida';
+  return 'fatura_recebida';
+}
+
 @Injectable()
 export class ExtractionService {
   private readonly logger = new Logger(ExtractionService.name);
   constructor(private prisma: PrismaService, private parties: PartiesService) {}
 
   extractFromText(text: string): ExtractedFields {
-    const hints: string[] = [];
     const normalized = text.replace(/\r/g, '\n');
     const qrCandidate =
       normalized.split(/\n/).find((l) => isLikelyAtQr(l)) ||
@@ -50,7 +67,7 @@ export class ExtractionService {
     const nifMatch =
       normalized.match(/(?:NIF|Contribuinte)[:\s]*(\d{9})/i) ||
       normalized.match(/\b([123568]\d{8})\b/);
-    const totalMatch = normalized.match(/(?:Total\s*(?:a\s*pagar)?|TOTAL)[:\s]*€?\s*([\d\.,]+)/i);
+    const totalMatch = normalized.match(/(?:Total\s*(?:a\s*pagar)?|TOTAL)[:\s]*\u20ac?\s*([\d\.,]+)/i);
     const parsePt = (s?: string) => {
       if (!s) return undefined;
       const n = parseFloat(s.replace(/\s/g, '').replace(/\./g, '').replace(',', '.'));
@@ -58,14 +75,12 @@ export class ExtractionService {
     };
     const nif = nifMatch?.[1];
     const total = parsePt(totalMatch?.[1]);
-    const numMatch = normalized.match(/(?:Fatura|FT|Invoice)[:\s#]*([A-Z0-9\/\-]+)/i);
     return {
       nif,
-      docNumber: numMatch?.[1]?.trim(),
       total,
       currency: 'EUR',
       confidence: nif && total != null ? 0.7 : 0.3,
-      rawHints: hints,
+      rawHints: [],
     };
   }
 
@@ -130,8 +145,9 @@ export class ExtractionService {
           knownFields: Object.keys(qrFields).length ? qrFields : undefined,
         });
         if (g) {
-          const extracted = {
-            supplier: g.supplier,
+          const name = supplierName(g.supplier);
+          const extracted: ExtractedFields = {
+            supplier: name,
             nif: qrFields.nif || g.nif,
             docNumber: qrFields.docNumber || g.docNumber,
             docDate: qrFields.docDate || g.docDate,
@@ -139,7 +155,7 @@ export class ExtractionService {
             total: qrFields.total ?? g.total,
             iva: qrFields.iva ?? g.iva,
             currency: g.currency || 'EUR',
-            confidence: Math.max(g.confidence, qrFields.nif ? 0.95 : 0),
+            confidence: Math.max(g.confidence || 0, qrFields.nif ? 0.95 : 0),
             rawHints: ['source:ai', engine],
           };
           const data: any = {
@@ -149,21 +165,38 @@ export class ExtractionService {
               extractedAt: new Date().toISOString(),
               ocrEngine: g.provider,
               qr: qrFields.source || null,
+              aiNotes: g.notes || null,
             },
           };
-          if (extracted.supplier && !doc.supplier) data.supplier = extracted.supplier;
+          if (name && !doc.supplier) data.supplier = name;
           if (extracted.nif && !doc.nif) data.nif = extracted.nif;
           if (extracted.docNumber && !doc.docNumber) data.docNumber = extracted.docNumber;
           if (extracted.total != null && doc.total == null) data.total = extracted.total;
           if (extracted.iva != null && doc.iva == null) data.iva = extracted.iva;
           if (extracted.docDate && !doc.docDate) data.docDate = new Date(extracted.docDate);
-          if (g.type) data.type = g.type;
+          if (extracted.dueDate && !doc.dueDate) data.dueDate = new Date(extracted.dueDate);
+          data.type = mapType(g.type);
           data.status = 'em_revisao';
+
+          if (name || extracted.nif) {
+            try {
+              const party = await this.parties.matchOrCreate(tenantId, userId, {
+                name: name || `NIF ${extracted.nif}`,
+                nif: extracted.nif,
+                type: PartyType.supplier,
+              });
+              if (party && !doc.partyId) data.partyId = party.id;
+            } catch (e) {
+              this.logger.warn(`Party match failed: ${e}`);
+            }
+          }
+
           const updated = await this.prisma.document.update({
             where: { id: documentId },
             data,
             include: { party: true },
           });
+          this.logger.log(`AI extract ok ${doc.fileName} engine=${g.provider}`);
           return { document: updated, extracted };
         }
       } catch (e: any) {
